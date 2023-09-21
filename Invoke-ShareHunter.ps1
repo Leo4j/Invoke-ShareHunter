@@ -35,31 +35,65 @@ function Invoke-ShareHunter{
 	else{$Computers = Get-ADComputers -ADCompDomain $Domain}
 	
 	if(!$NoPortScan){
+		
+		Write-Output ""
+		Write-Output "Running Port Scan..."
 	
-		$reachable_hosts = $null
-		$Tasks = $null
+		if (-not $Timeout) { $Timeout = 50 }
+
+		$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
+		$runspacePool.Open()
+
+		$runspaces = @()
 		$total = $Computers.Count
 		$count = 0
-		
-		if(!$Timeout){$Timeout = "50"}
-		
-		$reachable_hosts = @()
-		
-		$Tasks = $Computers | % {
-			Write-Progress -Activity "Scanning Ports" -Status "$count out of $total hosts scanned" -PercentComplete ($count / $total * 100)
-			$tcpClient = New-Object System.Net.Sockets.TcpClient
-			$asyncResult = $tcpClient.BeginConnect($_, 445, $null, $null)
-			$wait = $asyncResult.AsyncWaitHandle.WaitOne($Timeout)
-			if($wait) {
-				$tcpClient.EndConnect($asyncResult)
-				$tcpClient.Close()
-				$reachable_hosts += $_
-			} else {}
+
+		foreach ($Computer in $Computers) {
+			$scriptBlock = {
+				param($Computer, $Timeout)
+
+				$tcpClient = New-Object System.Net.Sockets.TcpClient
+				$asyncResult = $tcpClient.BeginConnect($Computer, 445, $null, $null)
+				$wait = $asyncResult.AsyncWaitHandle.WaitOne($Timeout)
+				if ($wait) {
+					$tcpClient.EndConnect($asyncResult)
+					$tcpClient.Close()
+					return $Computer
+				} else {
+					return $null
+				}
+			}
+
+			$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Computer).AddArgument($Timeout)
+			$runspace.RunspacePool = $runspacePool
+
+			$runspaces += [PSCustomObject]@{
+				Runspace = $runspace
+				Status   = $runspace.BeginInvoke()
+				Computer = $Computer
+			}
+
 			$count++
+			Write-Progress -Activity "Scanning Ports" -Status "$count out of $total hosts scanned" -PercentComplete ($count / $total * 100)
 		}
-		
+
+		# Initialize an array to store all reachable hosts
+		$reachable_hosts = @()
+
+		# Collect the results from each runspace
+		$runspaces | ForEach-Object {
+			$hostResult = $_.Runspace.EndInvoke($_.Status)
+			if ($hostResult) {
+				$reachable_hosts += $hostResult
+			}
+		}
+
+		# Close and clean up the runspace pool
+		$runspacePool.Close()
+		$runspacePool.Dispose()
+
 		Write-Progress -Activity "Scanning Ports" -Completed
-		
+
 		$Computers = $reachable_hosts
 
  	}
@@ -68,7 +102,7 @@ function Invoke-ShareHunter{
 	Write-Output "Enumerating Shares..."
 	
 	# Create runspace pool
-	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 	$runspacePool.Open()
 
 	$runspaces = @()
@@ -124,7 +158,7 @@ function Invoke-ShareHunter{
 	Write-Output ""
 	Write-Output "Checking for Readable Shares..."
 
-	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 	$runspacePool.Open()
 
 	$runspaces = @()
@@ -185,7 +219,7 @@ function Invoke-ShareHunter{
 	Write-Output ""
 	Write-Output "Checking for Writable Shares..."
 
-	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 	$runspacePool.Open()
 
 	$runspaces = @()
