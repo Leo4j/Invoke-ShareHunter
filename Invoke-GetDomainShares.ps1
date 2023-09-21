@@ -8,10 +8,6 @@ function Invoke-GetDomainShares{
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
-		$DomainController,
-		
-		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
-		[String]
 		$Targets,
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
@@ -68,58 +64,114 @@ function Invoke-GetDomainShares{
 
  	}
 	
-	$AllShares = @()
+	Write-Output ""
+	Write-Output "Enumerating Shares..."
 	
-	foreach($Computer in $Computers){
-		
-		$results = net view \\$Computer
+	# Create runspace pool
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool.Open()
 
-		$results = $results | Out-String
+	$runspaces = @()
 
-		# 1. Capture content between the delimiters using string methods
-		$startDelimiter = "-------------------------------------------------------------------------------"
-		$endDelimiter = "The command completed successfully."
+	foreach ($Computer in $Computers) {
+		$scriptBlock = {
+			param($Computer)
 
-		$startIndex = $results.IndexOf($startDelimiter)
-		$endIndex = $results.IndexOf($endDelimiter)
+			$results = net view \\$Computer
+			$results = $results | Out-String
 
-		$capturedContent = $results.Substring($startIndex + $startDelimiter.Length, $endIndex - $startIndex - $startDelimiter.Length).Trim()
+			$startDelimiter = "-------------------------------------------------------------------------------"
+			$endDelimiter = "The command completed successfully."
 
-		# 2. Scrape for the share names
-		$shareNames = ($capturedContent -split "`n") | Where-Object { $_ -match '^(\S+)\s+Disk' } | ForEach-Object { $matches[1] }
+			$startIndex = $results.IndexOf($startDelimiter)
+			$endIndex = $results.IndexOf($endDelimiter)
 
-		foreach($shareName in $shareNames){
-			$finalsharename = "\\" + $Computer + "\" + $shareName
-			$AllShares += $finalsharename
+			$capturedContent = $results.Substring($startIndex + $startDelimiter.Length, $endIndex - $startIndex - $startDelimiter.Length).Trim()
+
+			$shareNames = ($capturedContent -split "`n") | Where-Object { $_ -match '^(\S+)\s+Disk' } | ForEach-Object { $matches[1] }
+
+			return $shareNames | ForEach-Object { "\\" + $Computer + "\" + $_ }
+		}
+
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Computer)
+		$runspace.RunspacePool = $runspacePool
+
+		$runspaces += [PSCustomObject]@{
+			Runspace = $runspace
+			Status   = $runspace.BeginInvoke()
+			Computer = $Computer
+		}
+
+	}
+
+	# Initialize an array to store all shares
+	$AllShares = @()
+
+	# Collect the results from each runspace
+	$runspaces | ForEach-Object {
+		$shares = $_.Runspace.EndInvoke($_.Status)
+		if ($shares) { 
+			$AllShares += $shares
+		} else {
+			Write-Error "No shares found for $($_.Computer)"
 		}
 	}
+
+	# Close and clean up the runspace pool
+	$runspacePool.Close()
+	$runspacePool.Dispose()
 	
 	Write-Output ""
 	Write-Output "Checking for Readable Shares..."
-	
-	$ReadableShares = @()
-	
+
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool.Open()
+
+	$runspaces = @()
 	$total = $AllShares.Count
 	$count = 0
-	
-	foreach ($Share in $AllShares){
-		Write-Progress -Activity "Testing Read Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
-		
-		#clear error listing
-		$Error.clear()
-		
-		ls $Share > $null
-		
-		$ourerror = $error[0]
-		
-		if (($ourerror) -eq $null){
-			
-			$ReadableShares += $Share
+
+	foreach ($Share in $AllShares) {
+		$scriptBlock = {
+			param($Share)
+
+			$Error.clear()
+			ls $Share > $null
+			if (!$error[0]) {
+				return $Share
+			} else {
+				return $null
+			}
 		}
-		
+
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
+		$runspace.RunspacePool = $runspacePool
+
+		$runspaces += [PSCustomObject]@{
+			Runspace = $runspace
+			Status   = $runspace.BeginInvoke()
+			Share    = $Share
+		}
+
 		$count++
+		Write-Progress -Activity "Testing Read Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
 	}
-	
+
+	# Initialize an array to store all readable shares
+	$ReadableShares = @()
+
+	# Collect the results from each runspace
+	$runspaces | ForEach-Object {
+		$shareResult = $_.Runspace.EndInvoke($_.Status)
+		if ($shareResult) {
+			$ReadableShares += $shareResult
+		}
+	}
+
+	# Close and clean up the runspace pool
+	$runspacePool.Close()
+	$runspacePool.Dispose()
+
 	Write-Progress -Activity "Testing Read Access" -Completed
 	
 	Write-Output ""
@@ -132,19 +184,85 @@ function Invoke-GetDomainShares{
 	Write-Output ""
 	Write-Output ""
 	Write-Output "Checking for Writable Shares..."
-	
-	$WritableShares = @()
-	
+
+	$runspacePool = [runspacefactory]::CreateRunspacePool(1, [Environment]::ProcessorCount)
+	$runspacePool.Open()
+
+	$runspaces = @()
 	$total = $ReadableShares.Count
 	$count = 0
-	
-	foreach($Share in $ReadableShares){
-		Write-Progress -Activity "Testing Write Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
-		$WritableShares += Test-Write $Share
+
+	foreach ($Share in $ReadableShares) {
+		$scriptBlock = {
+			
+			param(
+				[Parameter(Mandatory=$true)]
+				[string]$Share
+			)
+			
+			function Test-Write {
+				[CmdletBinding()]
+				param (
+					[parameter()]
+					[string] $Path
+				)
+				try {
+					$testPath = Join-Path $Path ([IO.Path]::GetRandomFileName())
+					[IO.File]::Create($testPath, 1, 'DeleteOnClose') > $null
+					return "$Path"
+				} finally {
+					Remove-Item $testPath -ErrorAction SilentlyContinue
+				}
+			}
+			
+			try {
+				$result = Test-Write -Path $Share
+				return @{
+					Share = $Share
+					Result = $result
+					Error = $null
+				}
+			} catch {
+				return @{
+					Share = $Share
+					Result = $null
+					Error = $_.Exception.Message
+				}
+			}
+		}
+
+
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
+
+		$runspace.RunspacePool = $runspacePool
+
+		$runspaces += [PSCustomObject]@{
+			Runspace = $runspace
+			Status   = $runspace.BeginInvoke()
+			Share    = $Share
+		}
+
 		$count++
+		Write-Progress -Activity "Testing Write Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
 	}
-	
+
+	# Initialize an array to store all writable shares
+	$WritableShares = @()
+
+	# Collect the results from each runspace
+	$runspaces | ForEach-Object {
+		$runspaceData = $_.Runspace.EndInvoke($_.Status)
+		if ($runspaceData.Result) {
+			$WritableShares += $runspaceData.Result
+		}
+	}
+
+	# Close and clean up the runspace pool
+	$runspacePool.Close()
+	$runspacePool.Dispose()
+
 	Write-Progress -Activity "Testing Write Access" -Completed
+
 	
 	Write-Output ""
 	Write-Output "Writable Shares:"
@@ -187,19 +305,4 @@ function Get-ADComputers {
 	$searcher.Filter = $ldapFilter
 	$allcomputers = $searcher.FindAll() | %{$_.properties.dnshostname}
 	$allcomputers 
-}
-
-function Test-Write {
-	[CmdletBinding()]
-	param (
-		[parameter()] [ValidateScript({[IO.Directory]::Exists($_.FullName)})]
-		[IO.DirectoryInfo] $Path
-	)
-	try {
-		$testPath = Join-Path $Path ([IO.Path]::GetRandomFileName())
-		[IO.File]::Create($testPath, 1, 'DeleteOnClose') > $null
-		return "$Path"
-	} finally {
-		Remove-Item $testPath -ErrorAction SilentlyContinue
-	}
 }
