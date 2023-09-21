@@ -77,7 +77,7 @@ function Invoke-ShareHunter{
 		$scriptBlock = {
 			param($Computer)
 
-			$results = net view \\$Computer
+			$results = net view \\$Computer /ALL
 			$results = $results | Out-String
 
 			$startDelimiter = "-------------------------------------------------------------------------------"
