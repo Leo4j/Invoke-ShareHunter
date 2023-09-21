@@ -1,20 +1,21 @@
-# Invoke-GetDomainShares
+# Invoke-ShareHunter
 Enumerate the Domain for Readable and Writable Shares
 
 ```
-iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/Leo4j/Invoke-GetDomainShares/main/Invoke-GetDomainShares.ps1')
+iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/Leo4j/Invoke-ShareHunter/main/Invoke-ShareHunter.ps1')
 ```
 ```
-Invoke-GetDomainShares
+Invoke-ShareHunter
 ```
 ```
-Invoke-GetDomainShares -Domain ferrari.local
+Invoke-ShareHunter -Domain ferrari.local
 ```
 ```
-Invoke-GetDomainShares -Targets "Workstation-01.ferrari.local,DC01.ferrari.local"
+Invoke-ShareHunter -Targets "Workstation-01.ferrari.local,DC01.ferrari.local"
 ```
 ```
-Invoke-GetDomainShares -TargetsFile C:\Users\Public\Documents\Shares.txt
+Invoke-ShareHunter -TargetsFile C:\Users\Public\Documents\Shares.txt
 ```
 
-![image](https://github.com/Leo4j/Invoke-GetDomainShares/assets/61951374/1b071739-8665-4572-8ce3-e7fd1d935ac9)
+![image](https://github.com/Leo4j/Invoke-ShareHunter/assets/61951374/1b556062-a1ba-4bb5-b5be-d8bbcf6b97f0)
+
