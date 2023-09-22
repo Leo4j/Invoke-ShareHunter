@@ -55,13 +55,19 @@ function Invoke-ShareHunter{
 				$tcpClient = New-Object System.Net.Sockets.TcpClient
 				$asyncResult = $tcpClient.BeginConnect($Computer, 445, $null, $null)
 				$wait = $asyncResult.AsyncWaitHandle.WaitOne($Timeout)
-				if ($wait) {
-					$tcpClient.EndConnect($asyncResult)
-					$tcpClient.Close()
-					return $Computer
+				if ($wait) { 
+					try {
+						$tcpClient.EndConnect($asyncResult)
+						$connected = $true
+						return $Computer
+					} catch {
+						$connected = $false
+					}
 				} else {
-					return $null
+					$Connect = $false
 				}
+
+				$tcpClient.Close()
 			}
 
 			$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Computer).AddArgument($Timeout)
