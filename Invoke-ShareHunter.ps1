@@ -100,7 +100,7 @@ function Invoke-ShareHunter{
 						$connected = $false
 					}
 				} else {
-					$Connect = $false
+					$connected = $false
 				}
 
 				$tcpClient.Close()
