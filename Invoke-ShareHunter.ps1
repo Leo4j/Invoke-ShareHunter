@@ -69,6 +69,12 @@ function Invoke-ShareHunter{
 		Write-Output "Enumerating Computer Objects..."
 		$Computers = Get-ADComputers -ADCompDomain $Domain
 	}
+
+	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
+	$Computers = $Computers | Where-Object {-not ($_ -cmatch "$env:computername")}
+	$Computers = $Computers | Where-Object {-not ($_ -match "$env:computername")}
+	$Computers = $Computers | Where-Object {$_ -ne "$env:computername"}
+	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
 	
 	if(!$NoPortScan){
 		
