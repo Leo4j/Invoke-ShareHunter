@@ -60,26 +60,32 @@ function Invoke-ShareHunter{
 	
 	if(!$Domain){$Domain = Get-Domain}
 	
+	# LDAP Connection Initialization
+	Add-Type -AssemblyName System.DirectoryServices
+	$domainDistinguishedName = "DC=" + ($Domain -replace "\.", ",DC=")
+	$ldapQuery = "LDAP://$domainDistinguishedName"
+	$directoryEntry = New-Object System.DirectoryServices.DirectoryEntry $ldapQuery
+	
 	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
 	
 	elseif($Targets){$Computers = $Targets -split ","}
 	
 	else{
 		Write-Output ""
-		Write-Output "Enumerating Computer Objects..."
+		Write-Output "[+] Enumerating Computer Objects..."
 		$Computers = Get-ADComputers -ADCompDomain $Domain
 	}
 
 	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
 	$Computers = $Computers | Where-Object {-not ($_ -cmatch "$env:computername")}
-	$Computers = $Computers | Where-Object {-not ($_ -match "$env:computername")}
+	
 	$Computers = $Computers | Where-Object {$_ -ne "$env:computername"}
 	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
 	
 	if(!$NoPortScan){
 		
 		Write-Output ""
-		Write-Output "Running Port Scan..."
+		Write-Output "[+] Running Port Scan..."
 	
 		if (-not $Timeout) { $Timeout = 50 }
 
@@ -87,8 +93,6 @@ function Invoke-ShareHunter{
 		$runspacePool.Open()
 
 		$runspaces = @()
-		$total = $Computers.Count
-		$count = 0
 
 		foreach ($Computer in $Computers) {
 			$scriptBlock = {
@@ -102,11 +106,7 @@ function Invoke-ShareHunter{
 						$tcpClient.EndConnect($asyncResult)
 						$connected = $true
 						return $Computer
-					} catch {
-						$connected = $false
-					}
-				} else {
-					$connected = $false
+					} catch {}
 				}
 
 				$tcpClient.Close()
@@ -120,9 +120,6 @@ function Invoke-ShareHunter{
 				Status   = $runspace.BeginInvoke()
 				Computer = $Computer
 			}
-
-			$count++
-			Write-Progress -Activity "Scanning Ports" -Status "$count out of $total hosts scanned" -PercentComplete ($count / $total * 100)
 		}
 
 		# Initialize an array to store all reachable hosts
@@ -140,14 +137,12 @@ function Invoke-ShareHunter{
 		$runspacePool.Close()
 		$runspacePool.Dispose()
 
-		Write-Progress -Activity "Scanning Ports" -Completed
-
 		$Computers = $reachable_hosts
 
  	}
 	
 	Write-Output ""
-	Write-Output "Enumerating Shares..."
+	Write-Output "[+] Enumerating Shares..."
 	
 	$functiontable = @()
 	
@@ -164,9 +159,6 @@ function Invoke-ShareHunter{
 			# Getting all shares including hidden ones
 			$allResults = net view \\$Computer /ALL | Out-String
 
-			# Getting only non-hidden shares
-			$visibleResults = net view \\$Computer | Out-String
-
 			$startDelimiter = "-------------------------------------------------------------------------------"
 			$endDelimiter = "The command completed successfully."
 
@@ -182,10 +174,6 @@ function Invoke-ShareHunter{
 			}
 
 			$allShares = & $extractShares $allResults
-			$visibleShares = & $extractShares $visibleResults
-
-			# Determine hidden shares
-			$hiddenShares = $allShares | Where-Object { $_ -notin $visibleShares }
 
 			# Create hashtable for each share
 			return $allShares | ForEach-Object {
@@ -195,7 +183,6 @@ function Invoke-ShareHunter{
 					'FullShareName'    = $null
 					'Readable' = 'NO'
 					'Writable' = 'NO'
-					'Hidden'   = if ($_ -in $hiddenShares) { 'True' } else { 'False' }
 					'Domain'   = $Domain  # Assuming $Domain is available in this context
 				}
 			}
@@ -210,66 +197,62 @@ function Invoke-ShareHunter{
 			Computer = $Computer
 		}
 	}
+	
+	# Initialize an array to store all shares
+	$AllShares = @()
 
 	# Collect the results from each runspace
 	$runspaces | ForEach-Object {
 		$shares = $_.Runspace.EndInvoke($_.Status)
 		if ($shares) { 
 			$functiontable += $shares
+			
+			# Populate $AllShares within this loop
+			foreach($shareObj in $shares) {
+				$shareObj.Domain = $Domain
+				$sharename = "\\" + $shareObj.Targets + "\" + $shareObj.Share
+				$shareObj.FullShareName = $sharename
+				$AllShares += $sharename
+			}
 		} else {
-			Write-Error "No shares found for $($_.Computer)"
+			Write-Error "[-] No shares found for $($_.Computer)"
 		}
 	}
 
 	# Close and clean up the runspace pool
 	$runspacePool.Close()
 	$runspacePool.Dispose()
-	
-	# Initialize an array to store all shares
-	$AllShares = @()
-	
-	foreach($obj in $functiontable){
-		$obj.Domain = $Domain
-		$sharename = "\\" + $obj.Targets + "\" + $obj.Share
-		$obj.FullShareName = $sharename
-		$AllShares += $sharename
-	}
 
 	Write-Output ""
-	Write-Output "Checking for Readable Shares..."
+	Write-Output "[+] Testing Read Access..."
 
 	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 	$runspacePool.Open()
 
 	$runspaces = @()
-	$total = $AllShares.Count
-	$count = 0
 
 	foreach ($obj in $functiontable) {
-		$Share = $obj.FullShareName
 		$scriptBlock = {
-			param($Share)
+			param($obj)
 
 			$Error.clear()
-			ls $Share > $null
+			ls $obj.FullShareName > $null
 			if (!$error[0]) {
-				return $Share
+				$obj.Readable = "YES"
+				return $obj.FullShareName
 			} else {
 				return $null
 			}
 		}
 
-		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($obj)
 		$runspace.RunspacePool = $runspacePool
 
 		$runspaces += [PSCustomObject]@{
 			Runspace = $runspace
 			Status   = $runspace.BeginInvoke()
-			Share    = $Share
+			Object   = $obj
 		}
-
-		$count++
-		Write-Progress -Activity "Testing Read Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
 	}
 
 	# Initialize an array to store all readable shares
@@ -286,34 +269,22 @@ function Invoke-ShareHunter{
 	# Close and clean up the runspace pool
 	$runspacePool.Close()
 	$runspacePool.Dispose()
-
-	Write-Progress -Activity "Testing Read Access" -Completed
-	
-	foreach ($Share in $ReadableShares) {
-		foreach ($obj in $functiontable) {
-			if($obj.FullShareName -eq $Share){
-				$obj.Readable = "YES"
-			}
-		}
-	}
 	
 	Write-Output ""
-	Write-Output "Readable Shares:"
+	Write-Output "[+] Readable Shares:"
 	Write-Output ""
 	$ReadableShares
 	$ReadableShares | Out-File $pwd\Shares_Readable.txt -Force
 	Write-Output ""
-	Write-Output "Output saved to: $pwd\Shares_Readable.txt"
+	Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
 	Write-Output ""
 	Write-Output ""
-	Write-Output "Checking for Writable Shares..."
+	Write-Output "[+] Checking for Writable Shares..."
 
 	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 	$runspacePool.Open()
 
 	$runspaces = @()
-	$total = $ReadableShares.Count
-	$count = 0
 
 	foreach ($Share in $ReadableShares) {
 		$scriptBlock = {
@@ -365,9 +336,6 @@ function Invoke-ShareHunter{
 			Status   = $runspace.BeginInvoke()
 			Share    = $Share
 		}
-
-		$count++
-		Write-Progress -Activity "Testing Write Access" -Status "$count out of $total shares tested" -PercentComplete ($count / $total * 100)
 	}
 
 	# Initialize an array to store all writable shares
@@ -392,16 +360,14 @@ function Invoke-ShareHunter{
 			}
 		}
 	}
-
-	Write-Progress -Activity "Testing Write Access" -Completed
 	
 	Write-Output ""
-	Write-Output "Writable Shares:"
+	Write-Output "[+] Writable Shares:"
 	Write-Output ""
 	$WritableShares
 	$WritableShares | Out-File $pwd\Shares_Writable.txt -Force
 	Write-Output ""
-	Write-Output "Output saved to: $pwd\Shares_Writable.txt"
+	Write-Output "[+] Output saved to: $pwd\Shares_Writable.txt"
 	Write-Output ""
 	
 	$FinalTable = @()
@@ -410,11 +376,9 @@ function Invoke-ShareHunter{
 		if($obj.Readable -eq "YES"){
 			[PSCustomObject]@{
 				'Targets'  = $obj.Targets
-				'Operating System' = Get-OSFromFQDN -FQDN $obj.Targets
 				'Share Name'    = $obj.FullShareName
 				'Readable' = $obj.Readable
 				'Writable' = $obj.Writable
-				'Hidden'   = $obj.Hidden
 				'Domain'   = $obj.Domain  # Assuming $Domain is available in this context
 			}
 		}
@@ -424,13 +388,11 @@ function Invoke-ShareHunter{
 	$FinalResults
 	
 	$FinalResults | Out-File $pwd\Shares_Results.txt -Force
-	Write-Output "Output saved to: $pwd\Shares_Results.txt"
+	Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
 	Write-Output ""
 }
 
 function Get-Domain {
-	
-	Add-Type -AssemblyName System.DirectoryServices
 	
 	try{
 		$RetrieveDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
@@ -447,8 +409,6 @@ function Get-ADComputers {
 		[string]$ADCompDomain
 	)
 	
-	Add-Type -AssemblyName System.DirectoryServices
-	
 	$domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
 	$targetdomain = "LDAP://$domainDistinguishedName"
 	$searcher = New-Object System.DirectoryServices.DirectorySearcher
@@ -459,35 +419,4 @@ function Get-ADComputers {
 	$searcher.Filter = $ldapFilter
 	$allcomputers = $searcher.FindAll() | %{$_.properties.dnshostname}
 	$allcomputers 
-}
-
-function Get-OSFromFQDN {
-    param (
-        [string]$FQDN
-    )
-
-    # Convert the domain part of the FQDN to a distinguished name for the search root
-    $domainPart = $FQDN.Split('.',2)[1] # This takes everything after the first dot
-    $domainDistinguishedName = "DC=" + ($domainPart -replace "\.", ",DC=")
-
-    # Set the LDAP path for the domain
-    $ldapQuery = "LDAP://$domainDistinguishedName"
-
-    # Create a DirectoryEntry object and searcher
-    $directoryEntry = New-Object System.DirectoryServices.DirectoryEntry $ldapQuery
-    $searcher = New-Object System.DirectoryServices.DirectorySearcher
-    $searcher.SearchRoot = $directoryEntry
-    $searcher.Filter = "(&(objectClass=computer)(dNSHostName=$FQDN))"
-    $searcher.PropertiesToLoad.Add("OperatingSystem") | Out-Null
-
-    # Execute the search
-    $result = $searcher.FindOne()
-
-    # Return the OperatingSystem property
-    if ($result -and $result.Properties["OperatingSystem"].Count -gt 0) {
-        return $result.Properties["OperatingSystem"][0]
-    } else {
-        Write-Error "Unable to find the OS for the given FQDN or the OS attribute is not set."
-        return $null
-    }
 }
