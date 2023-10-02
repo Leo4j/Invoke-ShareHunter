@@ -372,7 +372,7 @@ function Invoke-ShareHunter{
  	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
 	
 	$FinalTable = foreach ($obj in $functiontable) {
- 		$shareName = ($obj."Share Name" -split '\\')[-1]
+ 		$shareName = ($obj.FullShareName -split '\\')[-1]
    		if (-not ($shareName -in $excludedShares -and $obj.Writable -ne "YES")) {
 			if($obj.Readable -eq "YES"){
 				[PSCustomObject]@{
