@@ -77,9 +77,6 @@ function Invoke-ShareHunter{
 	}
 
 	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
-	$Computers = $Computers | Where-Object {-not ($_ -cmatch "$env:computername")}
-	
-	$Computers = $Computers | Where-Object {$_ -ne "$env:computername"}
 	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
 	
 	if(!$NoPortScan){
