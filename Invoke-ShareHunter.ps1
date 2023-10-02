@@ -371,17 +371,22 @@ function Invoke-ShareHunter{
 	Write-Output ""
 	
 	$FinalTable = @()
+
+ 	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
 	
 	$FinalTable = foreach ($obj in $functiontable) {
-		if($obj.Readable -eq "YES"){
-			[PSCustomObject]@{
-				'Targets'  = $obj.Targets
-				'Share Name'    = $obj.FullShareName
-				'Readable' = $obj.Readable
-				'Writable' = $obj.Writable
-				'Domain'   = $obj.Domain  # Assuming $Domain is available in this context
+ 		$shareName = ($obj."Share Name" -split '\\')[-1]
+   		if (-not ($shareName -in $excludedShares -and $obj.Writable -ne "YES")) {
+			if($obj.Readable -eq "YES"){
+				[PSCustomObject]@{
+					'Targets'  = $obj.Targets
+					'Share Name'    = $obj.FullShareName
+					'Readable' = $obj.Readable
+					'Writable' = $obj.Writable
+					'Domain'   = $obj.Domain  # Assuming $Domain is available in this context
+				}
 			}
-		}
+  		}
 	}
 	
 	$FinalResults = $FinalTable | Sort-Object -Unique "Domain","Writable","Targets","Share Name" | ft -Autosize -Wrap
