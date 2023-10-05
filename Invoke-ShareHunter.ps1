@@ -49,6 +49,10 @@ function Invoke-ShareHunter{
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
 		$NoPortScan,
+
+  		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$DomainController,
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
@@ -59,12 +63,10 @@ function Invoke-ShareHunter{
 	$ErrorActionPreference = "SilentlyContinue"
 	
 	if(!$Domain){$Domain = Get-Domain}
-	
-	# LDAP Connection Initialization
-	Add-Type -AssemblyName System.DirectoryServices
-	$domainDistinguishedName = "DC=" + ($Domain -replace "\.", ",DC=")
-	$ldapQuery = "LDAP://$domainDistinguishedName"
-	$directoryEntry = New-Object System.DirectoryServices.DirectoryEntry $ldapQuery
+
+ 	if(!$DomainController){$DomainController = Get-DomainController -trgtdomain $Domain}
+
+ 	Establish-LDAPSession -DomainController $DomainController -SessionDomain Domain
 	
 	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
 	
@@ -421,4 +423,64 @@ function Get-ADComputers {
 	$searcher.Filter = $ldapFilter
 	$allcomputers = $searcher.FindAll() | %{$_.properties.dnshostname}
 	$allcomputers 
+}
+
+function Establish-LDAPSession {
+	
+	param (
+		[string]$SessionDomain,
+  		[string]$DomainController,
+	)
+
+ 	# Define LDAP parameters
+	$ldapServer = $DomainController
+	$ldapPort = 389 # Use 636 for LDAPS (SSL)
+
+	# Load necessary assembly
+	Add-Type -AssemblyName "System.DirectoryServices.Protocols"
+
+	# Create LDAP directory identifier
+	$identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($ldapServer, $ldapPort)
+
+	# Establish LDAP connection as current user
+	$ldapConnection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+
+	# Use Negotiate (Kerberos or NTLM) for authentication
+	$ldapConnection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+
+	# Bind (establish connection)
+	$ldapConnection.Bind()  # Bind as the current user
+	
+	return $ldapConnection
+}
+
+function Get-DomainController {
+	param (
+		[string]$trgtdomain
+	)
+	
+	Add-Type -AssemblyName System.DirectoryServices
+
+	# Create a DirectoryEntry object
+	$entry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$trgtdomain")
+
+	# Create a DirectorySearcher object
+	$searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
+ 	$searcher.PageSize = 1000
+	$searcher.Filter = "(objectClass=domainDNS)"
+	$searcher.PropertiesToLoad.Add("fSMORoleOwner") > $null  # Redirect output to $null to keep the console clean
+
+	# Perform the search
+	$results = $searcher.FindOne()
+	
+	if ($results) {
+		# Extract the FSMO role owner DN
+		$pdcDn = $results.Properties["fsmoroleowner"][0]
+
+		# Extract the DC name from the DN
+		$dcNamePattern = "CN=([^,]+),CN=Servers," 
+		if ($pdcDn -match $dcNamePattern) {
+			return $matches[1] # Return the actual DC name
+		} 
+	} 
 }
