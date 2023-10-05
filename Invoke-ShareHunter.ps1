@@ -60,7 +60,7 @@ function Invoke-ShareHunter{
 		
 	)
 	
-	$ErrorActionPreference = "SilentlyContinue"
+	#$ErrorActionPreference = "SilentlyContinue"
 	
 	if(!$Domain){$Domain = Get-Domain}
 
