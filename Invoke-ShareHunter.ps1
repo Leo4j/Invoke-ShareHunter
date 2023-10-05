@@ -60,13 +60,27 @@ function Invoke-ShareHunter{
 		
 	)
 	
-	#$ErrorActionPreference = "SilentlyContinue"
+	$ErrorActionPreference = "SilentlyContinue"
 	
-	if(!$Domain){$Domain = Get-Domain}
+	if(!$Domain){
+		try{
+			$RetrieveDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+			$RetrieveDomain = $RetrieveDomain.Name
+		}
+		catch{$RetrieveDomain = Get-WmiObject -Namespace root\cimv2 -Class Win32_ComputerSystem | Select Domain | Format-Table -HideTableHeaders | out-string | ForEach-Object { $_.Trim() }}
+		$Domain = $RetrieveDomain
+	}
 
- 	if(!$DomainController){$DomainController = Get-DomainController -trgtdomain $Domain}
+ 	if(!$DomainController){
+		
+		$result = nslookup -type=all "_ldap._tcp.dc._msdcs.$Domain" 2>$null
 
- 	Establish-LDAPSession -DomainController $DomainController -SessionDomain Domain > $null
+		# Filtering to find the line with 'svr hostname' and then split it to get the last part which is our DC name.
+		$DomainController = ($result | Where-Object { $_ -like '*svr hostname*' } | Select-Object -First 1).Split('=')[-1].Trim()
+
+	}
+	
+	$connection = Establish-LDAPSession -Domain $Domain -DomainController $DomainController
 	
 	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
 	
@@ -75,12 +89,13 @@ function Invoke-ShareHunter{
 	else{
 		Write-Output ""
 		Write-Output "[+] Enumerating Computer Objects..."
-		$Computers = Get-ADComputers -ADCompDomain $Domain
+		$Computers = Get-ADComputers -ADCompDomain $Domain -LdapConnection $connection
 	}
 
 	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
 	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
- 	$Computers = $Computers | Where-Object { $_ -and $_.trim() }
+	$Computers = $Computers | Where-Object { $_ -and $_.trim() }
+	
 	
 	if(!$NoPortScan){
 		
@@ -397,91 +412,68 @@ function Invoke-ShareHunter{
 	Write-Output ""
 }
 
-function Get-Domain {
-	
-	try{
-		$RetrieveDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
-		$RetrieveDomain = $RetrieveDomain.Name
-	}
-	catch{$RetrieveDomain = Get-WmiObject -Namespace root\cimv2 -Class Win32_ComputerSystem | Select Domain | Format-Table -HideTableHeaders | out-string | ForEach-Object { $_.Trim() }}
-	
-	$RetrieveDomain
+function Get-ADComputers {
+    param (
+        [string]$ADCompDomain,
+        [System.DirectoryServices.Protocols.LdapConnection]$LdapConnection  # The previously established connection
+    )
+
+    # Construct distinguished name for the domain.
+    $domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
+
+    # Set up an LDAP search request.
+    $ldapFilter = "(&(objectCategory=computer)(objectClass=computer))"
+    $attributesToLoad = @("dNSHostName")
+
+    $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
+        $domainDistinguishedName,     # Base DN
+        $ldapFilter,                  # LDAP filter
+        [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+        $attributesToLoad             # Attributes to retrieve
+    )
+
+    # Perform the search using the provided LdapConnection.
+    $searchResponse = $LdapConnection.SendRequest($searchRequest)
+
+    # Parse the results.
+    $allcomputers = @()
+    foreach ($entry in $searchResponse.Entries) {
+        $allcomputers += $entry.Attributes["dNSHostName"][0]
+    }
+
+    return $allcomputers
 }
 
-function Get-ADComputers {
-	
-	param (
-		[string]$ADCompDomain
-	)
-	
-	$domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
-	$targetdomain = "LDAP://$domainDistinguishedName"
-	$searcher = New-Object System.DirectoryServices.DirectorySearcher
-	$searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry $targetdomain
- 	$searcher.PageSize = 1000
-	
-	$ldapFilter = "(objectCategory=computer)"
-	$searcher.Filter = $ldapFilter
-	$allcomputers = $searcher.FindAll() | %{$_.properties.dnshostname}
-	$allcomputers 
-}
 
 function Establish-LDAPSession {
-	
-	param (
-		[string]$SessionDomain,
-  		[string]$DomainController
-	)
+    param (
+        [string]$Domain,
+        [string]$DomainController
+    )
 
- 	# Define LDAP parameters
-	$ldapServer = $DomainController
-	$ldapPort = 389 # Use 636 for LDAPS (SSL)
+    # If the DomainController parameter is just a name (not FQDN), append the domain to it.
+    if ($DomainController -notlike "*.*") {
+        $DomainController = "$DomainController.$Domain"
+    }
 
-	# Load necessary assembly
-	Add-Type -AssemblyName "System.DirectoryServices.Protocols"
+    # Define LDAP parameters
+    $ldapServer = $DomainController
+    $ldapPort = 389 # Use 636 for LDAPS (SSL)
 
-	# Create LDAP directory identifier
-	$identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($ldapServer, $ldapPort)
+    # Load necessary assembly
+    Add-Type -AssemblyName "System.DirectoryServices.Protocols"
 
-	# Establish LDAP connection as current user
-	$ldapConnection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+    # Create LDAP directory identifier
+    $identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($ldapServer, $ldapPort)
 
-	# Use Negotiate (Kerberos or NTLM) for authentication
-	$ldapConnection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+    # Establish LDAP connection as current user
+    $ldapConnection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
 
-	# Bind (establish connection)
-	$ldapConnection.Bind()  # Bind as the current user
-	
-	return $ldapConnection
-}
+    # Use Negotiate (Kerberos or NTLM) for authentication
+    $ldapConnection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
 
-function Get-DomainController {
-	param (
-		[string]$trgtdomain
-	)
-	
-	Add-Type -AssemblyName System.DirectoryServices
+    # Bind (establish connection)
+    $ldapConnection.Bind()  # Bind as the current user
 
-	# Create a DirectoryEntry object
-	$entry = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$trgtdomain")
-
-	# Create a DirectorySearcher object
-	$searcher = New-Object System.DirectoryServices.DirectorySearcher($entry)
- 	$searcher.PageSize = 1000
-	$searcher.Filter = "(objectClass=domainDNS)"
-	$searcher.PropertiesToLoad.Add("fSMORoleOwner") > $null  # Redirect output to $null to keep the console clean
-
-	# Perform the search
-	$results = $searcher.FindOne()
-	
-	if ($results) {
-		# Extract the FSMO role owner DN
-		$pdcDn = $results.Properties["fsmoroleowner"][0]
-
-		# Extract the DC name from the DN
-		$dcNamePattern = "CN=([^,]+),CN=Servers," 
-		if ($pdcDn -match $dcNamePattern) {
-			return $matches[1] # Return the actual DC name
-		} 
-	} 
+    return $ldapConnection
 }
