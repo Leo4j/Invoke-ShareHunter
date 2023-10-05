@@ -429,7 +429,7 @@ function Establish-LDAPSession {
 	
 	param (
 		[string]$SessionDomain,
-  		[string]$DomainController,
+  		[string]$DomainController
 	)
 
  	# Define LDAP parameters
