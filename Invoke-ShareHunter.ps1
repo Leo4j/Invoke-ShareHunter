@@ -422,7 +422,7 @@ function Get-ADComputers {
     $domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
 
     # Set up an LDAP search request.
-    $ldapFilter = "(&(objectCategory=computer)(objectClass=computer))"
+    $ldapFilter = "(&(objectCategory=computer)(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
     $attributesToLoad = @("dNSHostName")
 
     $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
