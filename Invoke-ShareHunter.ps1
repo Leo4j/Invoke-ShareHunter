@@ -66,7 +66,7 @@ function Invoke-ShareHunter{
 
  	if(!$DomainController){$DomainController = Get-DomainController -trgtdomain $Domain}
 
- 	Establish-LDAPSession -DomainController $DomainController -SessionDomain Domain
+ 	Establish-LDAPSession -DomainController $DomainController -SessionDomain Domain > $null
 	
 	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
 	
