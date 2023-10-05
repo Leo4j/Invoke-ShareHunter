@@ -425,21 +425,38 @@ function Get-ADComputers {
     $ldapFilter = "(&(objectCategory=computer)(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
     $attributesToLoad = @("dNSHostName")
 
-    $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
-        $domainDistinguishedName,     # Base DN
-        $ldapFilter,                  # LDAP filter
-        [System.DirectoryServices.Protocols.SearchScope]::Subtree,
-        $attributesToLoad             # Attributes to retrieve
-    )
-
-    # Perform the search using the provided LdapConnection.
-    $searchResponse = $LdapConnection.SendRequest($searchRequest)
-
-    # Parse the results.
     $allcomputers = @()
-    foreach ($entry in $searchResponse.Entries) {
-        $allcomputers += $entry.Attributes["dNSHostName"][0]
-    }
+
+    # Create a page request control
+    $pageRequest = New-Object System.DirectoryServices.Protocols.PageResultRequestControl(1000)
+    
+    do {
+        $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
+            $domainDistinguishedName,     # Base DN
+            $ldapFilter,                  # LDAP filter
+            [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+            $attributesToLoad             # Attributes to retrieve
+        )
+
+        # Add the page request control to the search request.
+        $searchRequest.Controls.Add($pageRequest)
+        
+        # Perform the search using the provided LdapConnection.
+        $searchResponse = $LdapConnection.SendRequest($searchRequest)
+
+        # Check for a page response control and update the cookie for the next request.
+        $pageResponse = $searchResponse.Controls | Where-Object { $_ -is [System.DirectoryServices.Protocols.PageResultResponseControl] }
+
+        if ($pageResponse) {
+            $pageRequest.Cookie = $pageResponse.Cookie
+        }
+
+        # Parse the results.
+        foreach ($entry in $searchResponse.Entries) {
+            $allcomputers += $entry.Attributes["dNSHostName"][0]
+        }
+
+    } while ($pageRequest.Cookie.Length -ne 0)
 
     return $allcomputers
 }
