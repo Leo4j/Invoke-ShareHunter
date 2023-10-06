@@ -49,6 +49,10 @@ function Invoke-ShareHunter{
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
 		$NoPortScan,
+
+  		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$DomainController,
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
@@ -58,13 +62,25 @@ function Invoke-ShareHunter{
 	
 	$ErrorActionPreference = "SilentlyContinue"
 	
-	if(!$Domain){$Domain = Get-Domain}
+	if(!$Domain){
+		try{
+			$RetrieveDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+			$RetrieveDomain = $RetrieveDomain.Name
+		}
+		catch{$RetrieveDomain = Get-WmiObject -Namespace root\cimv2 -Class Win32_ComputerSystem | Select Domain | Format-Table -HideTableHeaders | out-string | ForEach-Object { $_.Trim() }}
+		$Domain = $RetrieveDomain
+	}
+
+ 	if(!$DomainController){
+		
+		$result = nslookup -type=all "_ldap._tcp.dc._msdcs.$Domain" 2>$null
+
+		# Filtering to find the line with 'svr hostname' and then split it to get the last part which is our DC name.
+		$DomainController = ($result | Where-Object { $_ -like '*svr hostname*' } | Select-Object -First 1).Split('=')[-1].Trim()
+
+	}
 	
-	# LDAP Connection Initialization
-	Add-Type -AssemblyName System.DirectoryServices
-	$domainDistinguishedName = "DC=" + ($Domain -replace "\.", ",DC=")
-	$ldapQuery = "LDAP://$domainDistinguishedName"
-	$directoryEntry = New-Object System.DirectoryServices.DirectoryEntry $ldapQuery
+	$connection = Establish-LDAPSession -Domain $Domain -DomainController $DomainController
 	
 	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
 	
@@ -73,13 +89,13 @@ function Invoke-ShareHunter{
 	else{
 		Write-Output ""
 		Write-Output "[+] Enumerating Computer Objects..."
-		$Computers = Get-ADComputers -ADCompDomain $Domain
+		$Computers = Get-ADComputers -ADCompDomain $Domain -LdapConnection $connection
 	}
 
 	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
 	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
- 	
-  	$Computers = $Computers | Where-Object { $_ -and $_.trim() }
+	$Computers = $Computers | Where-Object { $_ -and $_.trim() }
+	
 	
 	if(!$NoPortScan){
 		
@@ -396,31 +412,85 @@ function Invoke-ShareHunter{
 	Write-Output ""
 }
 
-function Get-Domain {
-	
-	try{
-		$RetrieveDomain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
-		$RetrieveDomain = $RetrieveDomain.Name
-	}
-	catch{$RetrieveDomain = Get-WmiObject -Namespace root\cimv2 -Class Win32_ComputerSystem | Select Domain | Format-Table -HideTableHeaders | out-string | ForEach-Object { $_.Trim() }}
-	
-	$RetrieveDomain
+function Get-ADComputers {
+    param (
+        [string]$ADCompDomain,
+        [System.DirectoryServices.Protocols.LdapConnection]$LdapConnection  # The previously established connection
+    )
+
+    # Construct distinguished name for the domain.
+    $domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
+
+    # Set up an LDAP search request.
+    $ldapFilter = "(&(objectCategory=computer)(objectClass=computer)(!(userAccountControl:1.2.840.113556.1.4.803:=2)))"
+    $attributesToLoad = @("dNSHostName")
+
+    $allcomputers = @()
+
+    # Create a page request control
+    $pageRequest = New-Object System.DirectoryServices.Protocols.PageResultRequestControl(1000)
+    
+    do {
+        $searchRequest = New-Object System.DirectoryServices.Protocols.SearchRequest(
+            $domainDistinguishedName,     # Base DN
+            $ldapFilter,                  # LDAP filter
+            [System.DirectoryServices.Protocols.SearchScope]::Subtree,
+            $attributesToLoad             # Attributes to retrieve
+        )
+
+        # Add the page request control to the search request.
+        $searchRequest.Controls.Add($pageRequest)
+        
+        # Perform the search using the provided LdapConnection.
+        $searchResponse = $LdapConnection.SendRequest($searchRequest)
+
+        # Check for a page response control and update the cookie for the next request.
+        $pageResponse = $searchResponse.Controls | Where-Object { $_ -is [System.DirectoryServices.Protocols.PageResultResponseControl] }
+
+        if ($pageResponse) {
+            $pageRequest.Cookie = $pageResponse.Cookie
+        }
+
+        # Parse the results.
+        foreach ($entry in $searchResponse.Entries) {
+            $allcomputers += $entry.Attributes["dNSHostName"][0]
+        }
+
+    } while ($pageRequest.Cookie.Length -ne 0)
+
+    return $allcomputers
 }
 
-function Get-ADComputers {
-	
-	param (
-		[string]$ADCompDomain
-	)
-	
-	$domainDistinguishedName = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
-	$targetdomain = "LDAP://$domainDistinguishedName"
-	$searcher = New-Object System.DirectoryServices.DirectorySearcher
-	$searcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry $targetdomain
- 	$searcher.PageSize = 1000
-	
-	$ldapFilter = "(objectCategory=computer)"
-	$searcher.Filter = $ldapFilter
-	$allcomputers = $searcher.FindAll() | %{$_.properties.dnshostname}
-	$allcomputers 
+
+function Establish-LDAPSession {
+    param (
+        [string]$Domain,
+        [string]$DomainController
+    )
+
+    # If the DomainController parameter is just a name (not FQDN), append the domain to it.
+    if ($DomainController -notlike "*.*") {
+        $DomainController = "$DomainController.$Domain"
+    }
+
+    # Define LDAP parameters
+    $ldapServer = $DomainController
+    $ldapPort = 389 # Use 636 for LDAPS (SSL)
+
+    # Load necessary assembly
+    Add-Type -AssemblyName "System.DirectoryServices.Protocols"
+
+    # Create LDAP directory identifier
+    $identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($ldapServer, $ldapPort)
+
+    # Establish LDAP connection as current user
+    $ldapConnection = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+
+    # Use Negotiate (Kerberos or NTLM) for authentication
+    $ldapConnection.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+
+    # Bind (establish connection)
+    $ldapConnection.Bind()  # Bind as the current user
+
+    return $ldapConnection
 }
