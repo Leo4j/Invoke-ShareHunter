@@ -8,7 +8,7 @@ iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/
 Invoke-ShareHunter
 ```
 ```
-Invoke-ShareHunter -Domain ferrari.local
+Invoke-ShareHunter -Domain ferrari.local -DomainController DC01.ferrari.local
 ```
 ```
 Invoke-ShareHunter -Targets "Workstation-01.ferrari.local,DC01.ferrari.local"
