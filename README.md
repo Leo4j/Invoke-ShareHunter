@@ -2,7 +2,7 @@
 Enumerate the Domain for Readable and Writable Shares
 
 ```
-iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/Leo4j/Invoke-ShareHunter/main/Invoke-ShareHunter.ps1')
+iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/Leo4j/Invoke-ShareHunter/dev/Invoke-ShareHunter.ps1')
 ```
 ```
 Invoke-ShareHunter
