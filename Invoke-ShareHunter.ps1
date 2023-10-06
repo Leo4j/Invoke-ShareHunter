@@ -11,6 +11,9 @@ function Invoke-ShareHunter{
 	
 	.PARAMETER Domain
 	The target domain to enumerate shares for
+
+ 	.PARAMETER DomainController
+	The DC to bind to via LDAP
 	
 	.PARAMETER Targets
 	Provide comma-separated targets
