@@ -66,7 +66,7 @@ function Invoke-ShareHunter{
 
   		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[switch]
-		$readonly
+		$ReadOnly
 		
 	)
 	
@@ -301,7 +301,7 @@ function Invoke-ShareHunter{
 	Write-Output ""
 	Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
 	Write-Output ""
- 	if(!$readonly){
+ 	if(!$ReadOnly){
 		Write-Output ""
 		Write-Output "[+] Checking for Writable Shares..."
 	
