@@ -292,12 +292,15 @@ function Invoke-ShareHunter{
 	# Close and clean up the runspace pool
 	$runspacePool.Close()
 	$runspacePool.Dispose()
+
+ 	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
+	$filteredReadableShares = $ReadableShares | Where-Object { $excludedShares -notcontains $_.Name }
 	
 	Write-Output ""
 	Write-Output "[+] Readable Shares:"
 	Write-Output ""
-	$ReadableShares
-	$ReadableShares | Out-File $pwd\Shares_Readable.txt -Force
+	$filteredReadableShares
+	$filteredReadableShares | Out-File $pwd\Shares_Readable.txt -Force
 	Write-Output ""
 	Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
 	Write-Output ""
