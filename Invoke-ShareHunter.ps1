@@ -59,7 +59,11 @@ function Invoke-ShareHunter{
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
-		$Timeout
+		$Timeout,
+
+  		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[switch]
+		$readonly
 		
 	)
 	
@@ -294,123 +298,125 @@ function Invoke-ShareHunter{
 	Write-Output ""
 	Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
 	Write-Output ""
-	Write-Output ""
-	Write-Output "[+] Checking for Writable Shares..."
-
-	$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
-	$runspacePool.Open()
-
-	$runspaces = @()
-
-	foreach ($Share in $ReadableShares) {
-		$scriptBlock = {
-			
-			param(
-				[Parameter(Mandatory=$true)]
-				[string]$Share
-			)
-			
-			function Test-Write {
-				[CmdletBinding()]
-				param (
-					[parameter()]
-					[string] $Path
+ 	if(!$readonly){
+		Write-Output ""
+		Write-Output "[+] Checking for Writable Shares..."
+	
+		$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
+		$runspacePool.Open()
+	
+		$runspaces = @()
+	
+		foreach ($Share in $ReadableShares) {
+			$scriptBlock = {
+				
+				param(
+					[Parameter(Mandatory=$true)]
+					[string]$Share
 				)
+				
+				function Test-Write {
+					[CmdletBinding()]
+					param (
+						[parameter()]
+						[string] $Path
+					)
+					try {
+						$testPath = Join-Path $Path ([IO.Path]::GetRandomFileName())
+						$fileStream = [IO.File]::Create($testPath, 1, 'DeleteOnClose')
+						$fileStream.Close()
+						return "$Path"
+					} finally {
+						Remove-Item $testPath -ErrorAction SilentlyContinue
+					}
+				}
+				
 				try {
-					$testPath = Join-Path $Path ([IO.Path]::GetRandomFileName())
-					$fileStream = [IO.File]::Create($testPath, 1, 'DeleteOnClose')
-					$fileStream.Close()
-					return "$Path"
-				} finally {
-					Remove-Item $testPath -ErrorAction SilentlyContinue
+					$result = Test-Write -Path $Share
+					return @{
+						Share = $Share
+						Result = $result
+						Error = $null
+					}
+				} catch {
+					return @{
+						Share = $Share
+						Result = $null
+						Error = $_.Exception.Message
+					}
 				}
 			}
-			
-			try {
-				$result = Test-Write -Path $Share
-				return @{
-					Share = $Share
-					Result = $result
-					Error = $null
-				}
-			} catch {
-				return @{
-					Share = $Share
-					Result = $null
-					Error = $_.Exception.Message
+	
+	
+			$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
+	
+			$runspace.RunspacePool = $runspacePool
+	
+			$runspaces += [PSCustomObject]@{
+				Runspace = $runspace
+				Status   = $runspace.BeginInvoke()
+				Share    = $Share
+			}
+		}
+	
+		# Initialize an array to store all writable shares
+		$WritableShares = @()
+	
+		# Collect the results from each runspace
+		$runspaces | ForEach-Object {
+			$runspaceData = $_.Runspace.EndInvoke($_.Status)
+			if ($runspaceData.Result) {
+				$WritableShares += $runspaceData.Result
+			}
+		}
+	
+		# Close and clean up the runspace pool
+		$runspacePool.Close()
+		$runspacePool.Dispose()
+		
+		foreach ($Share in $WritableShares) {
+			foreach ($obj in $functiontable) {
+				if($obj.FullShareName -eq $Share){
+					$obj.Writable = "YES"
 				}
 			}
 		}
-
-
-		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
-
-		$runspace.RunspacePool = $runspacePool
-
-		$runspaces += [PSCustomObject]@{
-			Runspace = $runspace
-			Status   = $runspace.BeginInvoke()
-			Share    = $Share
-		}
-	}
-
-	# Initialize an array to store all writable shares
-	$WritableShares = @()
-
-	# Collect the results from each runspace
-	$runspaces | ForEach-Object {
-		$runspaceData = $_.Runspace.EndInvoke($_.Status)
-		if ($runspaceData.Result) {
-			$WritableShares += $runspaceData.Result
-		}
-	}
-
-	# Close and clean up the runspace pool
-	$runspacePool.Close()
-	$runspacePool.Dispose()
+		
+		Write-Output ""
+		Write-Output "[+] Writable Shares:"
+		Write-Output ""
+		$WritableShares
+		$WritableShares | Out-File $pwd\Shares_Writable.txt -Force
+		Write-Output ""
+		Write-Output "[+] Output saved to: $pwd\Shares_Writable.txt"
+		Write-Output ""
+		
+		$FinalTable = @()
 	
-	foreach ($Share in $WritableShares) {
-		foreach ($obj in $functiontable) {
-			if($obj.FullShareName -eq $Share){
-				$obj.Writable = "YES"
-			}
-		}
-	}
-	
-	Write-Output ""
-	Write-Output "[+] Writable Shares:"
-	Write-Output ""
-	$WritableShares
-	$WritableShares | Out-File $pwd\Shares_Writable.txt -Force
-	Write-Output ""
-	Write-Output "[+] Output saved to: $pwd\Shares_Writable.txt"
-	Write-Output ""
-	
-	$FinalTable = @()
-
- 	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
-	
-	$FinalTable = foreach ($obj in $functiontable) {
- 		$shareName = ($obj.FullShareName -split '\\')[-1]
-   		if (-not ($shareName -in $excludedShares -and $obj.Writable -ne "YES")) {
-			if($obj.Readable -eq "YES"){
-				[PSCustomObject]@{
-					'Targets'  = $obj.Targets
-					'Share Name'    = $obj.FullShareName
-					'Readable' = $obj.Readable
-					'Writable' = $obj.Writable
-					'Domain'   = $obj.Domain  # Assuming $Domain is available in this context
+	 	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
+		
+		$FinalTable = foreach ($obj in $functiontable) {
+	 		$shareName = ($obj.FullShareName -split '\\')[-1]
+	   		if (-not ($shareName -in $excludedShares -and $obj.Writable -ne "YES")) {
+				if($obj.Readable -eq "YES"){
+					[PSCustomObject]@{
+						'Targets'  = $obj.Targets
+						'Share Name'    = $obj.FullShareName
+						'Readable' = $obj.Readable
+						'Writable' = $obj.Writable
+						'Domain'   = $obj.Domain  # Assuming $Domain is available in this context
+					}
 				}
-			}
-  		}
-	}
-	
-	$FinalResults = $FinalTable | Sort-Object -Unique "Domain","Writable","Targets","Share Name" | ft -Autosize -Wrap
-	$FinalResults
-	
-	$FinalResults | Out-File $pwd\Shares_Results.txt -Force
-	Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
-	Write-Output ""
+	  		}
+		}
+		
+		$FinalResults = $FinalTable | Sort-Object -Unique "Domain","Writable","Targets","Share Name" | ft -Autosize -Wrap
+		$FinalResults
+		
+		$FinalResults | Out-File $pwd\Shares_Results.txt -Force
+		Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
+		Write-Output ""
+  	}
 }
 
 function Get-ADComputers {
