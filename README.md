@@ -16,6 +16,9 @@ Invoke-ShareHunter -Targets "Workstation-01.ferrari.local,DC01.ferrari.local"
 ```
 Invoke-ShareHunter -TargetsFile C:\Users\Public\Documents\Shares.txt
 ```
+```
+Invoke-ShareHunter -ReadOnly # Will not enumerate for writable shares
+```
 
 ![image](https://github.com/Leo4j/Invoke-ShareHunter/assets/61951374/b2834ab5-ee91-409c-9db4-9b4a90fc9382)
 
