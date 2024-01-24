@@ -294,7 +294,10 @@ function Invoke-ShareHunter{
 	$runspacePool.Dispose()
 
  	$excludedShares = @('SYSVOL', 'Netlogon', 'print$', 'IPC$')
-	$filteredReadableShares = $ReadableShares | Where-Object { $excludedShares -notcontains $_.Name }
+	$filteredReadableShares = $ReadableShares | Where-Object {
+	    $shareName = $_ -split '\\' | Select-Object -Last 1
+	    $shareName -notin $excludedShares
+	}
 	
 	Write-Output ""
 	Write-Output "[+] Readable Shares:"
