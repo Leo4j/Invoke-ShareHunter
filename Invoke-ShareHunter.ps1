@@ -26,6 +26,9 @@ function Invoke-ShareHunter{
 	
 	.PARAMETER Timeout
 	Timeout for the portscan before the port is considered closed (default: 50ms)
+
+ 	.PARAMETER ReadOnly
+	Will not enumrate for writable shares
 	
 	.EXAMPLE
 	Invoke-ShareHunter
