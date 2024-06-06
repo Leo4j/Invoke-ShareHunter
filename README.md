@@ -8,6 +8,9 @@ iex(new-object net.webclient).downloadstring('https://raw.githubusercontent.com/
 Invoke-ShareHunter
 ```
 ```
+Invoke-ShareHunter -Username Senna -Password P@ssw0rd! -UserDomain ferrari.local
+```
+```
 Invoke-ShareHunter -Domain ferrari.local -DomainController DC01.ferrari.local
 ```
 ```
