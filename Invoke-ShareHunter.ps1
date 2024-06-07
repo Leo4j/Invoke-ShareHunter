@@ -75,6 +75,10 @@ function Invoke-ShareHunter{
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
 		$UserDomain,
+		
+		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
+		[String]
+		$CompareTo,
 
   		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[switch]
@@ -646,14 +650,26 @@ public class Kernel32 {
 			$FinalResults | Out-File $pwd\Shares_$($Username)_Results.txt -Force
 			Write-Output "[+] Output saved to: $pwd\Shares_$($Username)_Results.txt"
 			Write-Output ""
-			if(Test-Path $pwd\Shares_Readable.txt){
-				$CompReadableShares = Get-Content -Path "$pwd\Shares_Readable.txt"
+			if($CompareTo -AND (Test-Path $CompareTo)){
+				$CompReadableShares = Get-Content -Path $CompareTo
 				$CompResultsShares = Get-Content -Path "$pwd\Shares_$($Username)_Readable.txt"
 				Write-Output ""
-				Write-Output "[+] Shares readable by $Username that $env:USERNAME cannot read:"
+				Write-Output "[+] Shares readable by $Username and not contained in $($CompareTo):"
 				Write-Output ""
 				$differences = Compare-Object -ReferenceObject $CompReadableShares -DifferenceObject $CompResultsShares -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
 				$differences | ForEach-Object { Write-Output "$_" }
+				Write-Output ""
+				Write-Output ""
+			}
+			elseif(Test-Path $pwd\Shares_Readable.txt){
+				$CompReadableShares = Get-Content -Path "$pwd\Shares_Readable.txt"
+				$CompResultsShares = Get-Content -Path "$pwd\Shares_$($Username)_Readable.txt"
+				Write-Output ""
+				Write-Output "[+] Shares readable by $Username and not contained in $pwd\Shares_Readable.txt:"
+				Write-Output ""
+				$differences = Compare-Object -ReferenceObject $CompReadableShares -DifferenceObject $CompResultsShares -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
+				if($differences){$differences | ForEach-Object { Write-Output "$_" }}
+				else{Write-Output "[-] None"}
 				Write-Output ""
 				Write-Output ""
 			}
@@ -662,6 +678,18 @@ public class Kernel32 {
 			$FinalResults | Out-File $pwd\Shares_Results.txt -Force
 			Write-Output "[+] Output saved to: $pwd\Shares_Results.txt"
 			Write-Output ""
+			if($CompareTo -AND (Test-Path $CompareTo)){
+				$CompReadableShares = Get-Content -Path $CompareTo
+				$CompResultsShares = Get-Content -Path "$pwd\Shares_Readable.txt"
+				Write-Output ""
+				Write-Output "[+] Shares readable by current user and not contained in $($CompareTo):"
+				Write-Output ""
+				$differences = Compare-Object -ReferenceObject $CompReadableShares -DifferenceObject $CompResultsShares -PassThru | Where-Object { $_.SideIndicator -eq '=>' }
+				if($differences){$differences | ForEach-Object { Write-Output "$_" }}
+				else{Write-Output "[-] None"}
+				Write-Output ""
+				Write-Output ""
+			}
 		}
 		Write-Output "[+] To perform a URLFile Attack run the following command:"
 		Write-Output ""
