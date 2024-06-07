@@ -11,6 +11,9 @@ Invoke-ShareHunter
 Invoke-ShareHunter -Username Senna -Password P@ssw0rd! -UserDomain ferrari.local
 ```
 ```
+Invoke-ShareHunter -CompareTo C:\Users\Schumaker\Desktop\Shares_Senna_Readable.txt
+```
+```
 Invoke-ShareHunter -Domain ferrari.local -DomainController DC01.ferrari.local
 ```
 ```
