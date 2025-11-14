@@ -131,7 +131,6 @@ function Invoke-ShareHunter{
 	
 	$domainjoined = Test-DomainJoinStatus
 	
-	
 	if(!$NoPortScan){
 		
 		Write-Output ""
@@ -207,7 +206,11 @@ function Invoke-ShareHunter{
 
 	foreach ($Computer in $Computers) {
 		$scriptBlock = {
-			param($Computer)
+			param($Computer, $domainjoined)
+			
+			$ipPattern = '\b(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}\b'
+			
+			if(!$domainjoined -AND ($Computer -match $ipPattern)){$Computer = (Resolve-DnsName $Computer).NameHost}
 
 			# Getting all shares including hidden ones
 			$allResults = net view \\$Computer /ALL | Out-String
@@ -241,7 +244,7 @@ function Invoke-ShareHunter{
 			}
 		}
 
-		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Computer)
+		$runspace = [powershell]::Create().AddScript($scriptBlock).AddArgument($Computer).AddArgument($domainjoined)
 		$runspace.RunspacePool = $runspacePool
 
 		$runspaces += [PSCustomObject]@{
