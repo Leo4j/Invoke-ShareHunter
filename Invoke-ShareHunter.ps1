@@ -11,15 +11,12 @@ function Invoke-ShareHunter{
 	
 	.PARAMETER Domain
 	The target domain to enumerate shares for
-
- 	.PARAMETER DomainController
-	The DC to bind to via LDAP
+	
+	.PARAMETER Server
+	The target Server to bind to
 	
 	.PARAMETER Targets
-	Provide comma-separated targets
-	
-	.PARAMETER TargetsFile
-	Provide a file containing a list of target hosts (one per line)
+	Provide comma-separated targets or target.txt or CIDR
 	
 	.PARAMETER NoPortScan
 	Do not run a portscan before checking for shares
@@ -50,15 +47,11 @@ function Invoke-ShareHunter{
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
-		$TargetsFile,
-		
-		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
-		[String]
 		$NoPortScan,
 
   		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
-		$DomainController,
+		$Server,
 		
 		[Parameter (Mandatory=$False, ValueFromPipeline=$true)]
 		[String]
@@ -103,29 +96,40 @@ function Invoke-ShareHunter{
 		catch{$RetrieveDomain = Get-WmiObject -Namespace root\cimv2 -Class Win32_ComputerSystem | Select Domain | Format-Table -HideTableHeaders | out-string | ForEach-Object { $_.Trim() }}
 		$Domain = $RetrieveDomain
 	}
+	
+	if($Targets){
+  		if(Test-Path $Targets){
+			$Computers = Get-Content -Path $Targets
+			$Computers = $Computers | Sort-Object -Unique
+		}
+		elseif ($Targets -match "/") {
+			$split = $Targets.Split("/")
+			$ipBase = $split[0]
+			$maskBits = [int]$split[1]
 
- 	if(!$DomainController){
-		
-		$result = nslookup -type=all "_ldap._tcp.dc._msdcs.$Domain" 2>$null
+			$ips = Get-SubnetAddresses -MaskBits $maskBits -IP $ipBase
 
-		# Filtering to find the line with 'svr hostname' and then split it to get the last part which is our DC name.
-		$DomainController = ($result | Where-Object { $_ -like '*svr hostname*' } | Select-Object -First 1).Split('=')[-1].Trim()
-
+			$Computers = @(Get-IPRange -Lower $ips[0] -Upper $ips[1])
+		}
+		else{
+			$Computers = $Targets
+			$Computers = $Computers -split ","
+		}
 	}
-	
-	if($TargetsFile){$Computers = Get-Content -Path $TargetsFile}
-	
-	elseif($Targets){$Computers = $Targets -split ","}
 	
 	else{
 		Write-Output ""
 		Write-Output "[+] Enumerating Computer Objects..."
-		$Computers = Get-ADComputers -ADCompDomain $Domain
+		if($Domain -AND $Server){$Computers = Get-ADComputers -ADCompDomain $Domain -ADCompServer $Server}
+		elseif($Domain -AND !$Server){$Computers = Get-ADComputers -ADCompDomain $Domain}
+		else{$Computers = Get-ADComputers}	
 	}
 
 	$HostFQDN = [System.Net.Dns]::GetHostByName(($env:computerName)).HostName
 	$Computers = $Computers | Where-Object {$_ -ne "$HostFQDN"}
 	$Computers = $Computers | Where-Object { $_ -and $_.trim() }
+	
+	$domainjoined = Test-DomainJoinStatus
 	
 	
 	if(!$NoPortScan){
@@ -133,7 +137,10 @@ function Invoke-ShareHunter{
 		Write-Output ""
 		Write-Output "[+] Running Port Scan..."
 	
-		if (-not $Timeout) { $Timeout = 50 }
+		if(-not $Timeout){
+			if($domainjoined){$Timeout = 50}
+			else{$Timeout = 5000}
+		}
 
 		$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
 		$runspacePool.Open()
@@ -417,7 +424,7 @@ public class Kernel32 {
 	}
 	
 	Write-Output ""
-	Write-Output "[+] Readable Shares:"
+	Write-Host "[+] Readable Shares:" -ForegroundColor Cyan
 	Write-Output ""
 	$filteredReadableShares
 	if($Username -AND $Password -AND $UserDomain){
@@ -433,7 +440,7 @@ public class Kernel32 {
 	
 	Write-Output ""
  	if(!$ReadOnly){
-		Write-Output ""
+		#Write-Output ""
 		Write-Output "[+] Checking for Writable Shares..."
 	
 		$runspacePool = [runspacefactory]::CreateRunspacePool(1, 10)
@@ -608,7 +615,7 @@ public class Kernel32 {
 		}
 		
 		Write-Output ""
-		Write-Output "[+] Writable Shares:"
+		Write-Host "[+] Writable Shares:" -ForegroundColor Cyan
 		Write-Output ""
 		$WritableShares
 		if($Username -AND $Password -AND $UserDomain){
@@ -643,9 +650,10 @@ public class Kernel32 {
 		}
 		
 		$FinalResults = $FinalTable | Sort-Object -Unique "Domain","Writable","Targets","Share Name" | ft -Autosize -Wrap
+		#Write-Output ""
+		Write-Host "[+] Results Table:" -ForegroundColor Cyan
+		($FinalResults | ft -Autosize -Wrap | Out-String).TrimEnd()
 		Write-Output ""
-		Write-Output "[+] Results Table:"
-		$FinalResults
 		if($Username -AND $Password -AND $UserDomain){
 			$FinalResults | Out-File $pwd\Shares_$($Username)_Results.txt -Force
 			Write-Output "[+] Output saved to: $pwd\Shares_$($Username)_Results.txt"
@@ -706,18 +714,25 @@ public class Kernel32 {
 
 function Get-ADComputers {
     param (
-        [string]$ADCompDomain
+        [string]$ADCompDomain,
+		[string]$ADCompServer
     )
 
     $allcomputers = @()
     $objSearcher = New-Object System.DirectoryServices.DirectorySearcher
 
     # Construct distinguished name for the domain.
-    if ($ADCompDomain) {
+    if ($ADCompDomain -and !$ADCompServer) {
         $domainDN = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
         $ldapPath = "LDAP://$domainDN"
         $objSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($ldapPath)
-    } else {
+    } 
+	elseif($ADCompDomain -AND $ADCompServer){
+		$domainDN = "DC=" + ($ADCompDomain -replace "\.", ",DC=")
+		$ldapPath = "LDAP://$ADCompServer/$domainDN"
+		$objSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry($ldapPath)
+	}
+	else {
         $objSearcher.SearchRoot = New-Object System.DirectoryServices.DirectoryEntry
     }
 
@@ -1043,3 +1058,63 @@ function Token-Impersonation {
 }
 
 function Revert-Token {process {[Advapi32]::RevertToSelf()}}
+
+function Get-SubnetAddresses {
+    Param (
+        [IPAddress]$IP,
+        [ValidateRange(0, 32)][int]$MaskBits
+    )
+
+    $mask = ([Math]::Pow(2, $MaskBits) - 1) * [Math]::Pow(2, (32 - $MaskBits))
+    $maskbytes = [BitConverter]::GetBytes([UInt32] $mask)
+    $DottedMask = [IPAddress]((3..0 | ForEach-Object { [String] $maskbytes[$_] }) -join '.')
+
+    $lower = [IPAddress] ( $ip.Address -band $DottedMask.Address )
+
+    $LowerBytes = [BitConverter]::GetBytes([UInt32] $lower.Address)
+    [IPAddress]$upper = (0..3 | % { $LowerBytes[$_] + ($maskbytes[(3 - $_)] -bxor 255) }) -join '.'
+
+    $ips = @($lower, $upper)
+    return $ips
+}
+
+function Get-IPRange {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [System.Net.IPAddress]$Lower,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNull()]
+        [System.Net.IPAddress]$Upper
+    )
+
+    $IPList = [Collections.ArrayList]::new()
+    $null = $IPList.Add($Lower)
+    $i = $Lower
+    while ( $i -ne $Upper ) { 
+        $iBytes = [BitConverter]::GetBytes([UInt32] $i.Address)
+        [Array]::Reverse($iBytes)
+        $nextBytes = [BitConverter]::GetBytes([UInt32]([bitconverter]::ToUInt32($iBytes, 0) + 1))
+        [Array]::Reverse($nextBytes)
+        $i = [IPAddress]$nextBytes
+        $null = $IPList.Add($i)
+    }
+    return $IPList.IPAddressToString
+}
+
+function Test-DomainJoinStatus {
+
+	try {
+		return (Get-WmiObject Win32_ComputerSystem).PartOfDomain
+	}
+	catch {
+		try {
+			$domainName = ([System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()).Name
+			return ($domainName -and ($domainName -ne $env:COMPUTERNAME))
+		}
+		catch {
+			return $false
+		}
+	}
+}
